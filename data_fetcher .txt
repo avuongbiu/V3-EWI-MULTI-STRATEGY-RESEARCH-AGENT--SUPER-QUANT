@@ -1,0 +1,439 @@
+# data_fetcher.py
+# Robust wrapper for vnstock_data (Silver Sponsor)
+# - Normalizes DataFrame columns and index
+# - Safe API calls with retries and fallbacks
+# - Compatible with multiple vnstock_data versions (best-effort)
+
+from __future__ import annotations
+
+from typing import Optional, Dict, Any, Callable, Iterable, List
+import pandas as pd
+import numpy as np
+from datetime import datetime
+import time
+import logging
+
+# Logger
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+logger = logging.getLogger("DataFetcher")
+
+# Try import vnstock_data components (best-effort)
+try:
+    from vnstock_data import Market, Reference, Fundamental, Macro, Insights, Analytics  # type: ignore
+    HAS_ALL_MODULES = True
+except Exception as e:
+    HAS_ALL_MODULES = False
+    Market = Reference = Fundamental = Macro = Insights = Analytics = None
+    logger.warning(f"⚠️ vnstock_data not available: {e}")
+
+# -----------------------
+# Module-level helpers
+# -----------------------
+def _to_numeric_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Convert object columns to numeric where possible (coerce)."""
+    if df is None or not isinstance(df, pd.DataFrame):
+        return df
+    for col in df.select_dtypes(include="object").columns:
+        try:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        except Exception:
+            pass
+    return df
+
+def _dedup(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop duplicated index keeping last."""
+    if df is None or not isinstance(df, pd.DataFrame):
+        return df
+    if df.index.duplicated().any():
+        df = df[~df.index.duplicated(keep="last")]
+    return df
+
+def _set_datetime_index(df: pd.DataFrame, time_col: Optional[str] = None) -> pd.DataFrame:
+    """Ensure DataFrame has DatetimeIndex using common time columns if needed."""
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return df
+    if not isinstance(df.index, pd.DatetimeIndex):
+        candidates = [c for c in ["time", "date", "tradingDate", "reportDate"] if c in df.columns]
+        col = time_col or (candidates[0] if candidates else None)
+        if col:
+            try:
+                df[col] = pd.to_datetime(df[col], errors="coerce")
+                df = df.set_index(col)
+            except Exception:
+                pass
+    if isinstance(df.index, pd.DatetimeIndex):
+        df = df.sort_index()
+        df = _dedup(df)
+    return df
+
+# -----------------------
+# DataFetcher class
+# -----------------------
+class DataFetcher:
+    def __init__(self, source: str = "VCI", start_date: str = "2023-01-01"):
+        if not HAS_ALL_MODULES:
+            raise ImportError("Please install vnstock_data (pip install vnstock_data) to use DataFetcher")
+        self.source = source
+        self.start_date = start_date
+        self.end_date = datetime.today().strftime("%Y-%m-%d")
+
+        # instantiate clients (best-effort)
+        try:
+            self.mkt = Market(source=source)
+            self.ref = Reference()
+            self.fun = Fundamental()
+            self.mac = Macro()
+            self.ins = Insights() if Insights is not None else None
+            self.ana = Analytics() if Analytics is not None else None
+        except Exception as e:
+            logger.error(f"Error initializing vnstock_data clients: {e}")
+            raise
+
+    # -----------------------
+    # Internal safe call wrapper
+    # -----------------------
+    def _safe_call(self, func: Callable[..., Any], retries: int = 3, delay: float = 0.5, **kwargs) -> Any:
+        """
+        Call func with retries. Return DataFrame/dict/list or pd.DataFrame() on failure.
+        Best-effort passes kwargs to func.
+        """
+        last_exc = None
+        for attempt in range(1, retries + 1):
+            try:
+                try:
+                    result = func(**kwargs)
+                except TypeError:
+                    result = func()
+                if result is None:
+                    return pd.DataFrame()
+                # If DataFrame, normalize index/cols later in caller
+                return result
+            except Exception as e:
+                last_exc = e
+                try:
+                    logger.warning(f"⚠️ API call error (attempt {attempt}/{retries}): {e}")
+                except Exception:
+                    pass
+                time.sleep(delay * attempt)
+                continue
+        try:
+            logger.error(f"❌ API call failed after {retries} attempts: {last_exc}")
+        except Exception:
+            pass
+        return pd.DataFrame()
+
+    def _to_df_if_possible(self, obj: Any) -> pd.DataFrame:
+        """Convert dict/list -> DataFrame; if already DataFrame return it; else empty DataFrame."""
+        if isinstance(obj, pd.DataFrame):
+            return obj
+        if obj is None:
+            return pd.DataFrame()
+        try:
+            df = pd.DataFrame(obj)
+            return df if not df.empty else pd.DataFrame()
+        except Exception:
+            return pd.DataFrame()
+
+    # -----------------------
+    # Market / Equity
+    # -----------------------
+    def get_ohlcv(self, symbol: str, source: Optional[str] = None) -> pd.DataFrame:
+        src = source or self.source
+        res = self._safe_call(lambda **kw: self.mkt.equity(symbol).ohlcv(start=self.start_date, end=self.end_date, source=src))
+        df = self._to_df_if_possible(res)
+        if df.empty:
+            return pd.DataFrame()
+        df = _set_datetime_index(df)
+        cols = [c for c in ("open", "high", "low", "close", "volume") if c in df.columns]
+        return _to_numeric_df(df[cols]) if cols else _to_numeric_df(df)
+
+    def get_multi_close(self, symbols: List[str]) -> pd.DataFrame:
+        frames: Dict[str, pd.Series] = {}
+        for sym in symbols:
+            try:
+                df = self.get_ohlcv(sym)
+                if isinstance(df, pd.DataFrame) and not df.empty and "close" in df.columns:
+                    s = pd.to_numeric(df["close"], errors="coerce").rename(sym)
+                    s = s[~s.index.duplicated(keep="last")]
+                    frames[sym] = s
+            except Exception as e:
+                logger.warning(f"[get_multi_close] {sym} error: {e}")
+        if not frames:
+            return pd.DataFrame()
+        price_df = pd.concat(frames.values(), axis=1, keys=frames.keys(), join="outer")
+        price_df = price_df.sort_index()
+        return _dedup(price_df)
+
+    def get_quote(self, symbol: str) -> Dict[str, Any]:
+        res = self._safe_call(lambda **kw: self.mkt.equity(symbol).quote())
+        if isinstance(res, pd.DataFrame):
+            if res.empty:
+                return {}
+            try:
+                return res.iloc[-1].to_dict()
+            except Exception:
+                try:
+                    recs = res.to_dict(orient="records")
+                    return recs[-1] if recs else {}
+                except Exception:
+                    return {}
+        if isinstance(res, dict):
+            return res
+        return {}
+
+    def get_summary(self, symbol: str) -> pd.DataFrame:
+        res = self._safe_call(lambda **kw: self.mkt.equity(symbol).summary())
+        return self._to_df_if_possible(res)
+
+    def get_foreign_flow(self, symbol: str) -> pd.DataFrame:
+        res = self._safe_call(lambda **kw: self.mkt.equity(symbol).foreign_flow(start=self.start_date, end=self.end_date))
+        df = self._to_df_if_possible(res)
+        return _set_datetime_index(_to_numeric_df(df))
+
+    def get_proprietary_flow(self, symbol: str) -> pd.DataFrame:
+        res = self._safe_call(lambda **kw: self.mkt.equity(symbol).proprietary_flow(start=self.start_date, end=self.end_date))
+        df = self._to_df_if_possible(res)
+        return _set_datetime_index(_to_numeric_df(df))
+
+    def get_block_trades(self, symbol: str) -> pd.DataFrame:
+        res = self._safe_call(lambda **kw: self.mkt.equity(symbol).block_trades(start=self.start_date, end=self.end_date))
+        df = self._to_df_if_possible(res)
+        return _set_datetime_index(_to_numeric_df(df))
+
+    def get_flow_summary(self, symbol: str) -> Dict[str, Any]:
+        result: Dict[str, Any] = {}
+        ff = self.get_foreign_flow(symbol)
+        if isinstance(ff, pd.DataFrame) and not ff.empty:
+            buy_col = next((c for c in ff.columns if "buy" in c.lower()), None)
+            sell_col = next((c for c in ff.columns if "sell" in c.lower()), None)
+            if buy_col and sell_col:
+                try:
+                    result["foreign_net_30d"] = float((ff[buy_col] - ff[sell_col]).tail(30).sum())
+                except Exception:
+                    pass
+        pp = self.get_proprietary_flow(symbol)
+        if isinstance(pp, pd.DataFrame) and not pp.empty:
+            buy_col = next((c for c in pp.columns if "buy" in c.lower()), None)
+            sell_col = next((c for c in pp.columns if "sell" in c.lower()), None)
+            if buy_col and sell_col:
+                try:
+                    result["prop_net_30d"] = float((pp[buy_col] - pp[sell_col]).tail(30).sum())
+                except Exception:
+                    pass
+        return result
+
+    # -----------------------
+    # Index / Market quote
+    # -----------------------
+    def get_index_quote(self, index_code: str = "VNINDEX") -> Dict[str, Any]:
+        """
+        Return normalized quote dict for index:
+        { 'close': float, 'change': float, 'pctChange': float, 'has_data': bool, 'raw': ... }
+        """
+        res = self._safe_call(lambda **kw: self.mkt.index(index_code).quote())
+        row: Dict[str, Any] = {}
+
+        if isinstance(res, pd.DataFrame):
+            if res.empty:
+                return {"close": 0.0, "change": 0.0, "pctChange": 0.0, "has_data": False, "raw": {}}
+            try:
+                row = res.iloc[-1].to_dict()
+            except Exception:
+                try:
+                    recs = res.to_dict(orient="records")
+                    row = recs[-1] if recs else {}
+                except Exception:
+                    row = {}
+        elif isinstance(res, dict):
+            row = res
+        elif isinstance(res, list):
+            try:
+                row = res[-1] if res else {}
+                if not isinstance(row, dict):
+                    row = {}
+            except Exception:
+                row = {}
+        else:
+            row = {}
+
+        def to_float_safe(x):
+            try:
+                if x is None:
+                    return np.nan
+                return float(x)
+            except Exception:
+                try:
+                    s = str(x).replace(",", "").replace("%", "")
+                    return float(s)
+                except Exception:
+                    return np.nan
+
+        close_price = to_float_safe(row.get("close_price") or row.get("close") or row.get("last_price") or row.get("price"))
+        ref_price = to_float_safe(row.get("reference_price") or row.get("reference") or row.get("prev_close"))
+        open_price = to_float_safe(row.get("open_price") or row.get("open"))
+
+        if np.isnan(close_price):
+            if not np.isnan(ref_price):
+                close_price = ref_price
+            elif not np.isnan(open_price):
+                close_price = open_price
+
+        change = np.nan
+        pct = np.nan
+        if not np.isnan(close_price) and not np.isnan(ref_price) and ref_price != 0:
+            change = close_price - ref_price
+            pct = (change / ref_price) * 100.0
+        elif not np.isnan(close_price) and np.isnan(ref_price):
+            change = 0.0
+            pct = 0.0
+
+        has_data = not np.isnan(close_price)
+
+        return {
+            "close": float(close_price) if not np.isnan(close_price) else 0.0,
+            "change": float(change) if not np.isnan(change) else 0.0,
+            "pctChange": float(pct) if not np.isnan(pct) else 0.0,
+            "has_data": bool(has_data),
+            "raw": row,
+        }
+
+    # -----------------------
+    # Fundamental
+    # -----------------------
+    def get_fundamental_summary(self, symbol: str) -> Dict[str, Any]:
+        result: Dict[str, Any] = {}
+        res = self._safe_call(lambda **kw: self.fun.equity(symbol).ratio())
+        df = self._to_df_if_possible(res) if not isinstance(res, dict) else self._to_df_if_possible(res)
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            try:
+                row = df.iloc[-1]
+            except Exception:
+                row = None
+        elif isinstance(res, dict):
+            # if ratio returned as dict of values
+            row = pd.Series(res)
+        else:
+            row = None
+
+        if row is None:
+            return result
+
+        field_map = {
+            "pe": ["pe", "p/e", "priceToEarning"],
+            "pb": ["pb", "p/b", "priceToBook"],
+            "roe": ["roe", "ro e", "ro_e", "ROE"],
+            "roa": ["roa", "ro a", "ro_a", "ROA"],
+            "eps": ["eps", "EPS"],
+            "debt_to_equity": ["debtonequity", "debt_to_equity", "debtOnEquity"],
+            "revenue_growth": ["revenuegrowth", "revenue_growth"],
+            "profit_margin": ["netprofitmargin", "profit_margin"],
+        }
+
+        for key, variants in field_map.items():
+            for var in variants:
+                if var in row.index:
+                    try:
+                        val = row[var]
+                        if pd.isna(val):
+                            continue
+                        val = float(val)
+                        if key in ["roe", "roa", "revenue_growth", "profit_margin"]:
+                            result[key] = round(val * 100, 2) if abs(val) < 10 else round(val, 2)
+                        else:
+                            result[key] = round(val, 2)
+                    except Exception:
+                        pass
+                    break
+        return result
+
+    def get_cash_flow(self, symbol: str) -> pd.DataFrame:
+        res = self._safe_call(lambda **kw: self.fun.equity(symbol).cash_flow())
+        return _to_numeric_df(self._to_df_if_possible(res))
+
+    def get_income_statement(self, symbol: str) -> pd.DataFrame:
+        res = self._safe_call(lambda **kw: self.fun.equity(symbol).income_statement())
+        return _to_numeric_df(self._to_df_if_possible(res))
+
+    # -----------------------
+    # Macro
+    # -----------------------
+    def get_macro_data(self, indicators: Optional[List[str]] = None) -> Dict[str, pd.Series]:
+        """
+        Return dict of time series for requested indicators (best-effort).
+        """
+        if indicators is None:
+            indicators = ["cpi", "gdp", "interest_rate", "usd_vnd"]
+
+        out: Dict[str, pd.Series] = {}
+        try:
+            eco = self.mac.economy()
+        except Exception:
+            eco = None
+
+        for ind in indicators:
+            key = ind.lower()
+            try:
+                if key in ("cpi", "inflation") and eco is not None:
+                    res = self._safe_call(lambda **kw: eco.cpi())
+                elif key == "gdp" and eco is not None:
+                    res = self._safe_call(lambda **kw: eco.gdp())
+                elif key in ("interest_rate", "policy_rate"):
+                    try:
+                        res = self._safe_call(lambda **kw: self.mac.currency().interest_rate())
+                    except Exception:
+                        res = pd.DataFrame()
+                elif key in ("usd_vnd", "vnd_usd", "fx"):
+                    try:
+                        res = self._safe_call(lambda **kw: self.mac.fx("USDVND"))
+                    except Exception:
+                        res = pd.DataFrame()
+                else:
+                    # try generic attribute on mac
+                    if hasattr(self.mac, key):
+                        res = self._safe_call(lambda **kw: getattr(self.mac, key)())
+                    else:
+                        res = pd.DataFrame()
+                df = self._to_df_if_possible(res)
+                if isinstance(df, pd.DataFrame) and not df.empty:
+                    # pick first numeric column
+                    numeric_cols = df.select_dtypes(include="number").columns.tolist()
+                    col = numeric_cols[0] if numeric_cols else (df.columns[0] if len(df.columns) > 0 else None)
+                    if col:
+                        s = pd.to_numeric(df[col], errors="coerce").rename(key)
+                        s.index = pd.to_datetime(df.index, errors="coerce") if not isinstance(df.index, pd.DatetimeIndex) else df.index
+                        s = s[~s.index.duplicated(keep="last")]
+                        out[key] = s
+            except Exception:
+                continue
+
+        return out
+
+    # -----------------------
+    # Market overview
+    # -----------------------
+    def get_market_overview(self) -> Dict[str, Any]:
+        overview: Dict[str, Any] = {}
+        for idx in ["VNINDEX", "VN30", "HNX"]:
+            try:
+                overview[idx.lower()] = self.get_index_quote(idx)
+            except Exception:
+                overview[idx.lower()] = {"close": 0.0, "change": 0.0, "pctChange": 0.0, "has_data": False, "raw": {}}
+
+        # Insights rankings (best-effort)
+        if self.ins is not None:
+            try:
+                overview["top_gainers"] = self._to_df_if_possible(self._safe_call(lambda **kw: self.ins.ranking().gainer()))
+                overview["top_losers"] = self._to_df_if_possible(self._safe_call(lambda **kw: self.ins.ranking().loser()))
+                overview["top_foreign_buy"] = self._to_df_if_possible(self._safe_call(lambda **kw: self.ins.ranking().foreign_buy()))
+                overview["top_foreign_sell"] = self._to_df_if_possible(self._safe_call(lambda **kw: self.ins.ranking().foreign_sell()))
+                overview["top_volume"] = self._to_df_if_possible(self._safe_call(lambda **kw: self.ins.ranking().volume()))
+            except Exception as e:
+                logger.debug(f"[get_market_overview] insights error: {e}")
+
+        return overview
+
+    # -----------------------
+    # Backwards alias
+    # -----------------------
+    def get_fundamental(self, symbol: str) -> Dict[str, Any]:
+        return self.get_fundamental_summary(symbol)

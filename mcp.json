@@ -1,0 +1,27 @@
+{
+  "mcpServers": {
+    "vnstock-vn": {
+      "command": "python",
+      "args": ["vn_mcp_server.py"],
+      "description": "VN Stock Market Data Server - wrapping vnstock_data Silver Sponsor",
+      "env": {
+        "PYTHONPATH": "."
+      }
+    }
+  },
+  "tools": [
+    "get_stock_price",
+    "get_fundamental",
+    "get_income_statement",
+    "get_balance_sheet",
+    "get_cash_flow",
+    "get_foreign_flow",
+    "get_company_news",
+    "get_company_info",
+    "get_market_overview",
+    "screen_stocks",
+    "get_sector_data",
+    "get_macro_data",
+    "get_derivatives"
+  ]
+}

@@ -1,0 +1,20 @@
+# === Core Dependencies ===
+streamlit>=1.32.0
+loguru>=0.7.2
+pandas>=2.2.0
+numpy>=1.26.0
+python-dotenv>=1.0.1
+
+# === Async & Networking ===
+aiohttp>=3.9.0
+asyncio-throttle>=1.0.2
+
+# === vnstock_data (Silver Sponsor) ===
+vnstock_data>=0.1.9
+
+# === Optional: Advanced Features ===
+redis>=5.0.0                    # Distributed cache
+python-telegram-bot>=20.0      # Alerting via Telegram
+plotly>=5.18.0                 # Interactive charts
+scikit-learn>=1.4.0            # Backtest ML models
+joblib>=1.3.2                  # Model serialization

@@ -1,0 +1,215 @@
+vnstock:
+  source: VCI
+  start_date: '2023-01-01'
+
+universe:
+  symbols:
+    - VCB
+    - TCB
+    - MBB
+    - HPG
+    - VNM
+    - FPT
+    - MWG
+    - VIC
+    - VHM
+    - ACB
+
+ai_agents:
+  enabled:
+    - DeepSeek
+    - Groq-Llama70B
+    - Groq-GPT-OSS
+    - Groq-Qwen3
+    - Groq-Llama4
+    - Gemini-Flash
+    - Grok-3-Mini
+    - Qwen-Plus
+    - Qwen-Plus-0728
+    - claude-opus-4-7
+    - claude-sonnet-4-5
+    - claude-haiku-4-5
+
+  agents:
+    # ── DeepSeek ──────────────────────────────────────────────────
+    - name: DeepSeek
+      provider: deepseek
+      model: deepseek-chat
+      temperature: 0.3
+
+    # ── Groq Production ───────────────────────────────────────────
+    - name: Groq-Llama70B
+      provider: groq
+      model: llama-3.3-70b-versatile
+      temperature: 0.3
+
+    - name: Groq-Llama8B
+      provider: groq
+      model: llama-3.1-8b-instant
+      temperature: 0.3
+
+    - name: Groq-GPT-OSS
+      provider: groq
+      model: openai/gpt-oss-120b
+      temperature: 0.3
+
+    # ── Groq Preview ──────────────────────────────────────────────
+    - name: Groq-Llama4
+      provider: groq
+      model: meta-llama/llama-4-maverick-17b-128e-instruct
+      temperature: 0.3
+
+    - name: Groq-Qwen3
+      provider: groq
+      model: qwen/qwen-3-32b
+      temperature: 0.3
+
+    - name: Groq-Kimi
+      provider: groq
+      model: moonshotai/kimi-k2-instruct-0905
+      temperature: 0.3
+
+    # ── OpenRouter – Google ───────────────────────────────────────
+    - name: Gemini-Flash
+      provider: openrouter
+      model: google/gemini-2.5-flash-preview-09-2025
+      temperature: 0.3
+
+    - name: Gemini-Flash-Lite
+      provider: openrouter
+      model: google/gemini-2.5-flash-lite
+      temperature: 0.3
+
+    # ── OpenRouter – xAI ──────────────────────────────────────────
+    - name: Grok-3-Mini
+      provider: openrouter
+      model: x-ai/grok-3-mini-beta
+      temperature: 0.3
+
+    # ── OpenRouter – Qwen ─────────────────────────────────────────
+    - name: Qwen-Plus
+      provider: openrouter
+      model: qwen/qwen-plus            # Qwen2.5 base, ổn định, $0.26/1M
+      temperature: 0.3
+
+    - name: Qwen-Plus-0728
+      provider: openrouter
+      model: qwen/qwen-plus-2025-07-28 # Qwen3 base, có reasoning, $0.40/1M
+      temperature: 0.3
+
+    - name: Qwen3-Plus
+      provider: openrouter
+      model: qwen/qwen3.6-plus         # Mới nhất Apr 2026
+      temperature: 0.3
+
+     # ── OpenRouter – Claude ─────────────────────────────────────────
+    - name: Claude Opus
+      provider: anthropic
+      model: claude-opus-4-7           
+      temperature: 0.2
+
+    - name: Claude Sonnet
+      provider: anthropic
+      model: claude-sonnet-4-5
+      temperature: 0.3
+      fallback_model: claude-3-5-sonnet-20241022  # ✅ Dự phòng
+
+    - name: Claude Haiku
+      provider: anthropic
+      model: claude-haiku-4-5         # Mới nhất Apr 2026
+      temperature: 0.4
+      fallback_model: claude-3-haiku-20240307
+
+    # ── OpenRouter – Meta / Mistral ───────────────────────────────
+    - name: Llama-4-OR
+      provider: openrouter
+      model: meta-llama/llama-4-maverick
+      temperature: 0.3
+
+    - name: Mistral-Large
+      provider: openrouter
+      model: mistralai/mistral-large-2411
+      temperature: 0.3
+
+    # ── OpenRouter – DeepSeek / Anthropic / OpenAI ────────────────
+    - name: OR-DSR1
+      provider: openrouter
+      model: deepseek/deepseek-r1
+      temperature: 0.1
+
+    - name: OR-Claude
+      provider: openrouter
+      model: anthropic/claude-sonnet-4-5
+      temperature: 0.3
+
+    - name: OR-GPT4o
+      provider: openrouter
+      model: openai/gpt-4o
+      temperature: 0.3
+
+    # ── Dùng khi có credit riêng ──────────────────────────────────
+    - name: ChatGPT
+      provider: openai
+      model: gpt-4o-mini
+      temperature: 0.3
+
+    - name: Claude
+      provider: anthropic
+      model: claude-sonnet-4-5
+      temperature: 0.3
+
+    - name: Qwen-DashScope
+      provider: qwen
+      model: qwen-max
+      temperature: 0.3
+
+pcmci:
+  tau_max: 4
+  alpha: 0.05
+
+market_regime: >
+  VNIndex vùng 1280, xu hướng trung tính.
+
+macro_context:
+  credit_growth: false
+  public_invest: true
+  rate_cut: false
+
+ai_agents:
+  fallback:
+    anthropic:
+      - provider: "openrouter"
+        model: "openrouter/anthropic/claude-sonnet-4-5"
+      - provider: "openai"
+        model: "gpt-4o-mini"
+    grok:
+      - provider: "grok"
+        model: "grok-4.3"
+      - provider: "openrouter"
+        model: "openrouter/google/gemini-2.5-flash-preview"
+
+  tuning:
+    provider_priority: ["grok","openrouter","openai","groq","qwen","deepseek"]
+    max_failover_attempts: 3
+    circuit_breaker_seconds: 300
+    allow_same_provider_fallback: false
+    max_fallback_cost_usd: 0.6
+    sensitive_request_policy: strict
+    preflight_ping: true
+    log_failover_events: true
+
+cost_per_1k_tokens:
+  openai: 0.03
+  openrouter: 0.025
+  anthropic: 0.04
+  groq: 0.02
+  qwen: 0.028
+  deepseek: 0.02
+  grok: 0.035
+  gpt-5.5: 5.00
+  claude-opus-4.7: 5.00
+  gemini-3.1: 2.00
+  deepseek-v4: 0.435
+  qwen-3.6-plus: 0.50
+  kimi-2.6: 0.95
+
