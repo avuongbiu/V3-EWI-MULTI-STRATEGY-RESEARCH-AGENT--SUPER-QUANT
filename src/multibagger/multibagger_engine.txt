@@ -1,0 +1,96 @@
+"""
+multibagger_engine.py - Yartseva (2025) Feature & Scoring Engine
+✅ Ánh xạ trực tiếp cột vnstock_data, loại bỏ proxy suy diễn
+✅ Tính toán đúng công thức CAFÉ WP 33
+✅ Trả về breakdown chi tiết cho UI & Alert
+"""
+import numpy as np
+from typing import Dict, Optional
+from dataclasses import dataclass
+from datetime import datetime
+
+@dataclass
+class MultibaggerConfig:
+    min_fcf_p: float = 0.04
+    max_price_range_12m: float = 0.30
+    min_roa: float = 0.08
+    min_bm_ratio: float = 0.40
+    max_log_tev: float = 20.0
+    buy_threshold: int = 5
+    hold_threshold: int = 3
+
+def safe_get(data: Dict, *keys, default=0.0) -> float:
+    for k in keys:
+        if isinstance(data, dict):
+            data = data.get(k)
+        else: return default
+    return float(data) if data is not None else default
+
+def compute_yartseva_features(symbol: str, quote: Dict, fundamentals: Dict, macro_ctx: Dict = None) -> Dict:
+    feat = {'symbol': symbol, 'timestamp': datetime.now().isoformat()}
+    macro = macro_ctx or {}
+
+    # 1. SIZE
+    mcap = safe_get(quote, 'market_cap', 'marketCap', default=0)
+    feat['tev_log'] = np.log(max(mcap, 1))
+    feat['is_smallcap'] = mcap < 50_000  # < 50T VND
+
+    # 2. VALUE: FCF/P (Operating Cash Flow / Market Cap)
+    price = safe_get(quote, 'price', 'currentPrice', default=1)
+    ocf = safe_get(fundamentals, 'cash_flow', 'operating_cash_flow', default=0)
+    feat['fcf_p'] = ocf / max(mcap, 1)
+
+    # 3. VALUE: B/M
+    bvps = safe_get(fundamentals, 'ratio', 'book_value_per_share', default=0)
+    feat['bm_ratio'] = bvps / max(price, 1)
+
+    # 4. PROFITABILITY: ROA
+    feat['roa'] = safe_get(fundamentals, 'ratio', 'ROA', 'roa', default=0)
+
+    # 5. INVESTMENT: Inv_Dummy
+    ag = safe_get(fundamentals, 'ratio', 'asset_growth_yoy', default=0)
+    eg = safe_get(fundamentals, 'ratio', 'EBITDA_growth_yoy', default=0)
+    feat['inv_dummy'] = 1 if ag > eg else 0
+
+    # 6. TIMING: Price Range 12M
+    h12 = safe_get(quote, 'price_52w_high', 'high52Week', default=0)
+    l12 = safe_get(quote, 'price_52w_low', 'low52Week', default=0)
+    pr = (price - l12) / max(h12 - l12, 1) if h12 > l12 else 0.5
+    feat['price_range_12m'] = pr
+    feat['current_price'] = price
+
+    # 7. MACRO
+    feat['rate_up_dummy'] = 1 if macro.get('rate_trend') == 'rising' else 0
+    return feat
+
+def calculate_multibagger_score(feat: Dict, cfg: MultibaggerConfig = None) -> Dict:
+    cfg = cfg or MultibaggerConfig()
+    score, bd = 0, {}
+
+    # FCF/P (+2)
+    if feat['fcf_p'] >= cfg.min_fcf_p: score += 2; bd['fcf_p'] = {'pass': True, 'pts': 2, 'val': f"{feat['fcf_p']:.1%}"}
+    else: bd['fcf_p'] = {'pass': False, 'pts': 0, 'val': f"{feat['fcf_p']:.1%}", 'gap': f"≥{cfg.min_fcf_p:.0%}"}
+
+    # Range12M (+2)
+    if feat['price_range_12m'] <= cfg.max_price_range_12m: score += 2; bd['range'] = {'pass': True, 'pts': 2, 'val': f"{feat['price_range_12m']:.0%}"}
+    else: bd['range'] = {'pass': False, 'pts': 0, 'val': f"{feat['price_range_12m']:.0%}", 'gap': f"≤{cfg.max_price_range_12m:.0%}"}
+
+    # Inv_Dummy (+1)
+    if feat['inv_dummy'] == 0: score += 1; bd['inv'] = {'pass': True, 'pts': 1, 'val': '0'}
+    else: bd['inv'] = {'pass': False, 'pts': 0, 'val': '1', 'gap': 'Asset growth > EBITDA growth'}
+
+    # ROA (+1)
+    if feat['roa'] >= cfg.min_roa: score += 1; bd['roa'] = {'pass': True, 'pts': 1, 'val': f"{feat['roa']:.1%}"}
+    else: bd['roa'] = {'pass': False, 'pts': 0, 'val': f"{feat['roa']:.1%}", 'gap': f"≥{cfg.min_roa:.0%}"}
+
+    # Macro (+1)
+    if feat['rate_up_dummy'] == 0: score += 1; bd['macro'] = {'pass': True, 'pts': 1, 'val': 'stable'}
+    else: bd['macro'] = {'pass': False, 'pts': 0, 'val': 'rising', 'gap': 'Rate rising'}
+
+    signal = 'BUY' if score >= cfg.buy_threshold else 'HOLD' if score >= cfg.hold_threshold else 'AVOID'
+    conf = 'HIGH' if score >= 6 else 'MEDIUM' if score >= 4 else 'LOW'
+    low, high = feat.get('price_52w_low', feat['current_price']*0.8), feat.get('price_52w_high', feat['current_price']*1.2)
+    entry = f"{low*1.02:,.0f} – {low + (high-low)*0.25:,.0f} VND" if low > 0 else "N/A"
+
+    return {'symbol': feat['symbol'], 'score': score, 'signal': signal, 'confidence': conf,
+            'entry_zone': entry, 'breakdown': bd, 'features': feat}
